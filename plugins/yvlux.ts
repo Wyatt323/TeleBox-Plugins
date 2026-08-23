@@ -295,7 +295,8 @@ const resolveForwardSenderFromHeader = async (forwardHeader: Api.MessageFwdHeade
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
-const pluginName = "yvlu";
+// 使用 yvlux 避免与官方 yvlu 插件的命令重名；保留配置目录 assets/yvlu，迁移时不会丢失现有设置。
+const pluginName = "yvlux";
 const commandName = `${mainPrefix}${pluginName}`;
 
 // 包含自定义修改后的 Help 文档字符串
@@ -493,7 +494,7 @@ class YvluPlugin extends Plugin {
 
   // 核心指令注册器
   cmdHandlers: Record<string, (msg: Api.Message, trigger?: Api.Message) => Promise<void>> = {
-    yvlu: async (msg: Api.Message, trigger?: Api.Message) => {
+    yvlux: async (msg: Api.Message, trigger?: Api.Message) => {
       const start = Date.now();
       const args = msg.message.split(/\s+/);
       const subCmd = args[1]?.toLowerCase();

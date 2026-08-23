@@ -1,0 +1,18 @@
+{
+  "tj": {
+    "url": "https://github.com/Wyatt323/TeleBox-Plugins/blob/main/plugins/tj.ts?raw=true",
+    "desc": "统计指定消息的全部回复，返回用户、时间与消息列表"
+  },
+  "aix": {
+    "url": "https://github.com/Wyatt323/TeleBox-Plugins/blob/main/plugins/aix.ts?raw=true",
+    "desc": "个人维护的 AI 功能插件"
+  },
+  "stsave": {
+    "url": "https://github.com/Wyatt323/TeleBox-Plugins/blob/main/plugins/stsave.ts?raw=true",
+    "desc": "保存贴纸或将回复的媒体转换并保存至贴纸包"
+  },
+  "yvlux": {
+    "url": "https://github.com/Wyatt323/TeleBox-Plugins/blob/main/plugins/yvlux.ts?raw=true",
+    "desc": "个人语录贴纸插件；命令为 .yvlux，避免与官方 yvlu 重名"
+  }
+}
