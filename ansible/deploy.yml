@@ -43,8 +43,10 @@
       ansible.builtin.shell:
         cmd: |
           set -euo pipefail
-          for file in plugins/tj.ts; do
-            test -f "$file"
+          shopt -s nullglob
+          files=(plugins/*.ts)
+          ((${#files[@]} > 0)) || { echo "未找到待部署的插件" >&2; exit 1; }
+          for file in "${files[@]}"; do
             node -e 'const fs=require("fs"); const esbuild=require("esbuild"); esbuild.transformSync(fs.readFileSync(process.argv[1], "utf8"), {loader:"ts", target:"es2020"}); console.log(process.argv[1] + ": OK")' "$file"
           done
         chdir: "{{ telebox_dir }}"
