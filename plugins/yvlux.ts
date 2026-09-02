@@ -321,26 +321,6 @@ const help_text = `
  * 知识点：Telegram 消息实体 (Entity) 映射转换器
  * 将 MTProto 协议里的内联样式、URL、提及、隐藏文字等转换为 quote-api 可识别的 JSON 结构
  */
-function getChatMemberRank(message: Api.Message, sender: any): Promise<string> {
-  if (!sender || !message.client) return Promise.resolve("");
-  return (async () => {
-    try {
-      const chat = await message.getInputChat();
-      const participantResult = await (message.client as any).getParticipant(chat, sender);
-      const rank = participantResult?.participant?.rank ?? participantResult?.rank;
-      return typeof rank === "string" ? rank.trim() : "";
-    } catch {
-      // 私聊或无法读取成员信息时没有群内标签。
-      return "";
-    }
-  })();
-}
-
-function getSenderTagColor(rank: string): string | undefined {
-  if (!rank) return undefined;
-  return rank === "群主" || rank.toLowerCase() === "owner" ? "#A855F7" : "#22C55E";
-}
-
 function convertEntities(entities: Api.TypeMessageEntity[]): any[] {
   if (!entities) return [];
 
@@ -637,8 +617,6 @@ class YvluPlugin extends Plugin {
             const firstName = (sender as any).firstName || (sender as any).title || "";
             const lastName = (sender as any).lastName || "";
             const username = (sender as any).username || "";
-            const chatMemberRank = await getChatMemberRank(message, sender);
-            const senderTagColor = getSenderTagColor(chatMemberRank);
             const emojiStatus = (sender as any).emojiStatus?.documentId?.toString() || null;
 
             // 根据前序用户标识决定是否连通气泡（不在气泡旁绘制头像）
@@ -825,8 +803,6 @@ class YvluPlugin extends Plugin {
                 photo,
                 emoji_status: shouldShowAvatar ? emojiStatus || undefined : undefined,
               },
-              senderTag: shouldShowAvatar && chatMemberRank ? chatMemberRank : undefined,
-              senderTagColor: shouldShowAvatar && senderTagColor ? senderTagColor : undefined,
               text: message.message || "",
               entities: entities,
               avatar: shouldShowAvatar,
