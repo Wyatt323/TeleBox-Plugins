@@ -336,6 +336,11 @@ function getChatMemberRank(message: Api.Message, sender: any): Promise<string> {
   })();
 }
 
+function getSenderTagColor(rank: string): string | undefined {
+  if (!rank) return undefined;
+  return rank === "群主" || rank.toLowerCase() === "owner" ? "#A855F7" : "#22C55E";
+}
+
 function convertEntities(entities: Api.TypeMessageEntity[]): any[] {
   if (!entities) return [];
 
@@ -633,9 +638,7 @@ class YvluPlugin extends Plugin {
             const lastName = (sender as any).lastName || "";
             const username = (sender as any).username || "";
             const chatMemberRank = await getChatMemberRank(message, sender);
-            const displayName = chatMemberRank
-              ? `${name || `${firstName} ${lastName}`.trim()} [${chatMemberRank}]`
-              : name;
+            const senderTagColor = getSenderTagColor(chatMemberRank);
             const emojiStatus = (sender as any).emojiStatus?.documentId?.toString() || null;
 
             // 根据前序用户标识决定是否连通气泡（不在气泡旁绘制头像）
@@ -815,9 +818,11 @@ class YvluPlugin extends Plugin {
             items.push({
               from: {
                 id: userId ? parseInt(userId) : hashCode(sender.name || `${firstName}|${lastName}`),
-                name: shouldShowAvatar ? displayName : "",
+                name: shouldShowAvatar ? name : "",
                 first_name: shouldShowAvatar ? firstName || undefined : undefined,
                 last_name: shouldShowAvatar ? lastName || undefined : undefined,
+                senderTag: shouldShowAvatar && chatMemberRank ? chatMemberRank : undefined,
+                senderTagColor: shouldShowAvatar && senderTagColor ? senderTagColor : undefined,
                 username: photo && shouldShowAvatar ? username || undefined : undefined,
                 photo,
                 emoji_status: shouldShowAvatar ? emojiStatus || undefined : undefined,
