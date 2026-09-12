@@ -4618,7 +4618,7 @@ class PromptFeature extends BaseFeatureHandler {
         const rule = args.slice(4).join(" ").trim();
         requireUser(!!keyword && !!rule, "关键词和规则内容不能为空");
         requireUser(keyword.length <= 64, "关键词不能超过 64 个字符");
-        requireUser(rule.length <= 1000, "规则内容不能超过 1000 个字符");
+        requireUser(rule.length <= 2000, "规则内容不能超过 2000 个字符");
         await configManager.updateConfig((cfg) => {
           cfg.imagePromptRules ||= {};
           cfg.imagePromptRules[keyword] = rule;
