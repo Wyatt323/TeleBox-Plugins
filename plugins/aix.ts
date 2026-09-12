@@ -4221,6 +4221,20 @@ class ConfigFeature extends BaseFeatureHandler {
     }
 
     const action = args[1].toLowerCase();
+    if (action === "list" || action === "ls") {
+      const list =
+        Object.values(config.configs)
+          .map(
+            (c) =>
+              `🏷️ <code>${c.tag}</code> - ${c.url}\n🧩 Type: <code>${formatProviderTypeLabel(c)}</code>\n🌊 Stream: <code>${c.stream ? "on" : "off"}</code>\n🧠 Responses(chat/search): <code>${c.responses ? "on" : "off"}</code>`,
+          )
+          .join("\n") || "暂无配置";
+      await this.editMessage(
+        msg,
+        `📋 <b>API 配置列表:</b>\n\n⚙️ 配置:\n${list}`,
+      );
+      return;
+    }
     if (action === "add") {
       requireUser(args.length >= 5, "参数格式错误");
       await this.addConfig(msg, args, configManager);
