@@ -60,6 +60,7 @@ interface DB {
   videoAudio: boolean;
   videoDuration: number;
   prompt: string;
+  imagePromptRules: Record<string, string>;
   collapse: boolean;
   timeout: number;
   telegraphToken: string;
@@ -124,10 +125,19 @@ const getPromptLengthInstruction = (
 };
 
 const MEME_PROMPT_KEYWORD = "表情包";
-const MEME_PROMPT_PRESERVATION_RULE = "当用户需求中出现“表情包”时，必须严格遵守：不要改变原有的人物或动物的形象、身份、五官、毛色、服饰和核心外观特征；可以根据配文修改人物或动物的动作和表情。";
+const MEME_PROMPT_PRESERVATION_RULE = "不要改变原有的人物或动物的形象、身份、五官、毛色、服饰和核心外观特征；可以根据配文修改人物或动物的动作和表情。";
 
-const buildImagePromptOptimizationRequest = (prompt: string, lengthMode?: PromptLengthMode): string => {
-  const memeRule = prompt.includes(MEME_PROMPT_KEYWORD) ? MEME_PROMPT_PRESERVATION_RULE : "";
+const getMatchedImagePromptRules = (prompt: string, rules: Record<string, string>): string[] =>
+  Object.entries(rules)
+    .filter(([keyword, rule]) => keyword && rule && prompt.includes(keyword))
+    .map(([keyword, rule]) => `关键词“${keyword}”命中后必须遵守：${rule}`);
+
+const buildImagePromptOptimizationRequest = (
+  prompt: string,
+  lengthMode?: PromptLengthMode,
+  imagePromptRules: Record<string, string> = {},
+): string => {
+  const matchedRules = getMatchedImagePromptRules(prompt, imagePromptRules);
   return [
     "把用户的生图需求改写成更适合图像模型的提示词。",
     "要求：保留原意，不换主题；补足主体、场景、构图、光线、色彩、风格和氛围。",
@@ -136,7 +146,7 @@ const buildImagePromptOptimizationRequest = (prompt: string, lengthMode?: Prompt
     "图生图要生成新图，不要复制、拼接、分屏、九宫格。",
     "如果用户要求多张图，每一条优化提示词都必须明确写出不同的画面文案/文字内容/表情重点，不能只是同义改写。",
     "如果是表情包加字，必须把要显示的中文文字直接写进画面要求里；多张图时每条文字都要不同。",
-    memeRule,
+    ...matchedRules,
     getPromptLengthInstruction(lengthMode, IMAGE_PROMPT_LENGTH_LABELS),
     "",
     "用户需求：",
@@ -1886,6 +1896,7 @@ class ConfigManager {
       videoAudio: false,
       videoDuration: 5,
       prompt: "",
+      imagePromptRules: { [MEME_PROMPT_KEYWORD]: MEME_PROMPT_PRESERVATION_RULE },
       collapse: true,
       timeout: 30,
       telegraphToken: "",
@@ -2007,6 +2018,18 @@ class ConfigManager {
       cfg.currentVideoTag = cfg.currentChatTag;
     if (!cfg.currentVideoModel && cfg.currentChatModel)
       cfg.currentVideoModel = cfg.currentChatModel;
+
+    if (!cfg.imagePromptRules || typeof cfg.imagePromptRules !== "object" || Array.isArray(cfg.imagePromptRules)) {
+      cfg.imagePromptRules = { [MEME_PROMPT_KEYWORD]: MEME_PROMPT_PRESERVATION_RULE };
+    } else {
+      const sanitizedRules: Record<string, string> = {};
+      for (const [keyword, rule] of Object.entries(cfg.imagePromptRules)) {
+        const normalizedKeyword = String(keyword).trim();
+        const normalizedRule = typeof rule === "string" ? rule.trim() : "";
+        if (normalizedKeyword && normalizedRule) sanitizedRules[normalizedKeyword] = normalizedRule;
+      }
+      cfg.imagePromptRules = sanitizedRules;
+    }
 
     if (typeof cfg.imagePreview !== "boolean") cfg.imagePreview = true;
     if (typeof cfg.promptOptimize !== "boolean") cfg.promptOptimize = true;
@@ -4572,14 +4595,58 @@ class PromptFeature extends BaseFeatureHandler {
     const config = configManager.getConfig();
 
     if (args.length < 2) {
+      const rules = Object.entries(config.imagePromptRules || {});
+      const ruleLines = rules.length
+        ? rules.map(([keyword, rule]) => `• <code>${htmlEscape(keyword)}</code> → ${htmlEscape(rule)}`).join("\n")
+        : "未设置";
       await this.editMessage(
         msg,
-        `💭 <b>当前提示词:</b>\n\n📝 内容: <code>${config.prompt || "未设置"}</code>`,
+        `💭 <b>当前提示词:</b>\n\n📝 内容: <code>${htmlEscape(config.prompt || "未设置")}</code>\n\n` +
+        `🖼️ <b>生图关键词规则:</b>\n${ruleLines}\n\n` +
+        `<code>.aix prompt rule add 关键词 规则内容</code>\n` +
+        `<code>.aix prompt rule del 关键词</code>`,
       );
       return;
     }
 
     const action = args[1].toLowerCase();
+    if (action === "rule") {
+      const ruleAction = args[2]?.toLowerCase();
+      if (ruleAction === "add") {
+        requireUser(args.length >= 5, "用法：.aix prompt rule add 关键词 规则内容");
+        const keyword = args[3]?.trim();
+        const rule = args.slice(4).join(" ").trim();
+        requireUser(!!keyword && !!rule, "关键词和规则内容不能为空");
+        requireUser(keyword.length <= 64, "关键词不能超过 64 个字符");
+        requireUser(rule.length <= 1000, "规则内容不能超过 1000 个字符");
+        await configManager.updateConfig((cfg) => {
+          cfg.imagePromptRules ||= {};
+          cfg.imagePromptRules[keyword] = rule;
+        });
+        await this.editMessage(msg, `✅ 已添加生图关键词规则：<code>${htmlEscape(keyword)}</code>`);
+        return;
+      }
+      if (ruleAction === "del" || ruleAction === "rm" || ruleAction === "remove") {
+        const keyword = args.slice(3).join(" ").trim();
+        requireUser(!!keyword, "用法：.aix prompt rule del 关键词");
+        requireUser(!!config.imagePromptRules?.[keyword], `关键词规则不存在：${keyword}`);
+        await configManager.updateConfig((cfg) => {
+          delete cfg.imagePromptRules[keyword];
+        });
+        await this.editMessage(msg, `✅ 已删除生图关键词规则：<code>${htmlEscape(keyword)}</code>`);
+        return;
+      }
+      if (ruleAction === "list" || !ruleAction) {
+        const rules = Object.entries(config.imagePromptRules || {});
+        const lines = rules.length
+          ? rules.map(([keyword, rule]) => `• <code>${htmlEscape(keyword)}</code> → ${htmlEscape(rule)}`).join("\n")
+          : "未设置";
+        await this.editMessage(msg, `🖼️ <b>生图关键词规则</b>\n\n${lines}`);
+        return;
+      }
+      throw new UserError("用法：.aix prompt rule add|del|list");
+    }
+
     if (action === "set") {
       requireUser(args.length >= 3, "参数格式错误");
       await configManager.updateConfig((cfg) => {
@@ -5512,7 +5579,7 @@ class ImageFeature extends BaseFeatureHandler {
             const basePrompt = `${explicitPrompt}\n\n第${i + 1}张必须和其他图片明显不同；如果是表情包加字，这一张必须直接写出自己专属的画面文字，不能和其他张重复。`;
             const optimized = await runPromptOptimizationWithTimeout(
               this.aiService,
-              buildImagePromptOptimizationRequest(basePrompt, config.promptLength),
+              buildImagePromptOptimizationRequest(basePrompt, config.promptLength, config.imagePromptRules),
               imageParts,
               token,
               Math.max((config.timeout || 30), 20) * 1000,
@@ -5535,7 +5602,7 @@ class ImageFeature extends BaseFeatureHandler {
         } else {
           const optimized = await runPromptOptimizationWithTimeout(
             this.aiService,
-            buildImagePromptOptimizationRequest(originalPrompt, config.promptLength),
+            buildImagePromptOptimizationRequest(originalPrompt, config.promptLength, config.imagePromptRules),
             imageParts,
             token,
             Math.max((config.timeout || 30), 20) * 1000,
@@ -6116,6 +6183,9 @@ class AIXPlugin extends Plugin {
 <b>🛠 其他:</b>
 • <code>${mainPrefix}aix image optimize on|off</code> - 图片提示词优化
 • <code>${mainPrefix}aix image optimize length</code> - 图片优化提示词长度（short 80-180 / medium 150-300 / long 250-500 字）
+• <code>${mainPrefix}aix prompt rule add 关键词 规则内容</code> - 添加命中关键词后自动注入的生图优化规则
+• <code>${mainPrefix}aix prompt rule list</code> - 查看生图关键词规则
+• <code>${mainPrefix}aix prompt rule del 关键词</code> - 删除生图关键词规则
 • <code>${mainPrefix}aix video optimize on|off</code> - 视频提示词优化
 • <code>${mainPrefix}aix video optimize length</code> - 视频优化提示词长度（short 120-260 / medium 200-400 / long 300-600 字）
 • <code>${mainPrefix}aix image preview on|off</code> - 图片预览
