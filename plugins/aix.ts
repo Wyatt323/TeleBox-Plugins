@@ -123,8 +123,12 @@ const getPromptLengthInstruction = (
   return `只输出提示词正文，不要解释、标题、Markdown、引号；中文输入就中文输出；控制在 ${labels[normalized]}。`;
 };
 
-const buildImagePromptOptimizationRequest = (prompt: string, lengthMode?: PromptLengthMode): string =>
-  [
+const MEME_PROMPT_KEYWORD = "表情包";
+const MEME_PROMPT_PRESERVATION_RULE = "当用户需求中出现“表情包”时，必须严格遵守：不要改变原有的人物或动物的形象、身份、五官、毛色、服饰和核心外观特征；可以根据配文修改人物或动物的动作和表情。";
+
+const buildImagePromptOptimizationRequest = (prompt: string, lengthMode?: PromptLengthMode): string => {
+  const memeRule = prompt.includes(MEME_PROMPT_KEYWORD) ? MEME_PROMPT_PRESERVATION_RULE : "";
+  return [
     "把用户的生图需求改写成更适合图像模型的提示词。",
     "要求：保留原意，不换主题；补足主体、场景、构图、光线、色彩、风格和氛围。",
     "如果有参考图/贴纸/头像，只提炼视觉特征和气质，不要写成看图说明。",
@@ -132,11 +136,13 @@ const buildImagePromptOptimizationRequest = (prompt: string, lengthMode?: Prompt
     "图生图要生成新图，不要复制、拼接、分屏、九宫格。",
     "如果用户要求多张图，每一条优化提示词都必须明确写出不同的画面文案/文字内容/表情重点，不能只是同义改写。",
     "如果是表情包加字，必须把要显示的中文文字直接写进画面要求里；多张图时每条文字都要不同。",
+    memeRule,
     getPromptLengthInstruction(lengthMode, IMAGE_PROMPT_LENGTH_LABELS),
     "",
     "用户需求：",
     prompt,
-  ].join("\n");
+  ].filter(Boolean).join("\n");
+};
 
 const buildVideoPromptOptimizationRequest = (prompt: string, lengthMode?: PromptLengthMode): string =>
   [
