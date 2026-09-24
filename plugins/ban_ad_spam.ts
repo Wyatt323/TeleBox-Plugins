@@ -57,6 +57,12 @@ function voteText(vote: Vote): string {
   return `🛡️ <b>Ban 投票</b>\n\n同意人数：<b>${vote.voters.size}/${REQUIRED_VOTES}</b>\n有效期：${remaining} 秒\n\n点击下方按钮投票，同一用户只能投一次。`;
 }
 
+function buildVoteKeyboard(count: number, token: string): Api.ReplyInlineMarkup {
+  return new InlineKeyboard()
+    .callback(`✅ 同意 Ban（${count}/${REQUIRED_VOTES}）`, `ban_ad_spam:${token}`)
+    .build();
+}
+
 class BanAdSpamPlugin extends Plugin {
   name = "ban_ad_spam";
   description = "ban广告触发 5 分钟、3 人同意的 /spam 投票";
@@ -112,7 +118,7 @@ class BanAdSpamPlugin extends Plugin {
     }
 
     await event.answer({ message: `投票成功：${vote.voters.size}/${REQUIRED_VOTES}` });
-    await event.edit({ text: voteText(vote), parseMode: "html", buttons: new InlineKeyboard().callback(`✅ 同意 Ban（${vote.voters.size}/${REQUIRED_VOTES}）`, `ban_ad_spam:${token}`) });
+    await event.edit({ text: voteText(vote), parseMode: "html", buttons: buildVoteKeyboard(vote.voters.size, token) });
   }
 
   listenMessageHandler = async (msg: Api.Message): Promise<void> => {
@@ -141,7 +147,7 @@ class BanAdSpamPlugin extends Plugin {
       const voteMessage = await msg.client.sendMessage(msg.peerId, {
         message: voteText(vote),
         replyTo: targetMessageId,
-        buttons: new InlineKeyboard().callback(`✅ 同意 Ban（0/${REQUIRED_VOTES}）`, `ban_ad_spam:${token}`),
+        buttons: buildVoteKeyboard(0, token),
         parseMode: "html",
       });
       vote.voteMessage = voteMessage;
