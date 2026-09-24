@@ -1,6 +1,20 @@
-import { Api } from "teleproto";
+import { Api, InlineKeyboard, type TelegramClient } from "teleproto";
+import { CallbackQuery, CallbackQueryEvent } from "teleproto/events";
 import { Plugin } from "@utils/pluginBase";
 import { safeGetMe } from "@utils/authGuards";
+
+const VOTE_TTL_MS = 5 * 60 * 1000;
+const REQUIRED_VOTES = 3;
+
+type Vote = {
+  peer: any;
+  client: TelegramClient;
+  targetMessageId: number;
+  voteMessage: Api.Message;
+  voters: Set<string>;
+  expiresAt: number;
+  completed: boolean;
+};
 
 function getReplyMessageId(msg: Api.Message): number | undefined {
   const typed = msg as Api.Message & {
@@ -38,34 +52,108 @@ function explicitlyMentionsMe(msg: Api.Message, myId: string, myUsername: string
   return false;
 }
 
+function voteText(vote: Vote): string {
+  const remaining = Math.max(0, Math.ceil((vote.expiresAt - Date.now()) / 1000));
+  return `🛡️ <b>Ban 投票</b>\n\n同意人数：<b>${vote.voters.size}/${REQUIRED_VOTES}</b>\n有效期：${remaining} 秒\n\n点击下方按钮投票，同一用户只能投一次。`;
+}
+
 class BanAdSpamPlugin extends Plugin {
   name = "ban_ad_spam";
-  description = "收到回复消息中的 @提及 和 ban广告 后，自动对目标消息回复 /spam";
+  description = "ban广告触发 5 分钟、3 人同意的 /spam 投票";
   cmdHandlers: Record<string, (msg: Api.Message) => Promise<void>> = {};
+  eventHandlers = [
+    {
+      event: new CallbackQuery({ match: /^ban_ad_spam:/ }),
+      handler: async (event: unknown) => this.handleVote(event as CallbackQueryEvent),
+    },
+  ];
+
+  private votes = new Map<string, Vote>();
+  private sequence = 0;
+
+  private cleanupVotes(): void {
+    const now = Date.now();
+    for (const [token, vote] of this.votes) {
+      if (vote.completed || vote.expiresAt <= now) this.votes.delete(token);
+    }
+  }
+
+  private async handleVote(event: CallbackQueryEvent): Promise<void> {
+    const data = Buffer.from(event.data || []).toString("utf8");
+    const token = data.slice("ban_ad_spam:".length);
+    const vote = this.votes.get(token);
+    if (!vote || vote.completed || vote.expiresAt <= Date.now()) {
+      await event.answer({ message: "这项投票已结束", alert: true });
+      this.votes.delete(token);
+      return;
+    }
+
+    const senderId = toId(event.query.userId);
+    if (!senderId) {
+      await event.answer({ message: "无法识别投票用户", alert: true });
+      return;
+    }
+    if (vote.voters.has(senderId)) {
+      await event.answer({ message: "你已经投过票了", alert: true });
+      return;
+    }
+
+    vote.voters.add(senderId);
+    if (vote.voters.size >= REQUIRED_VOTES) {
+      vote.completed = true;
+      await vote.client.sendMessage(vote.peer, {
+        message: "/spam",
+        replyTo: vote.targetMessageId,
+      });
+      await event.answer({ message: "已达到 3 人同意，已执行 /spam" });
+      await event.edit({ text: "✅ <b>投票通过</b>\n已达到 3 人同意，已回复 /spam。", parseMode: "html", buttons: [] });
+      this.votes.delete(token);
+      return;
+    }
+
+    await event.answer({ message: `投票成功：${vote.voters.size}/${REQUIRED_VOTES}` });
+    await event.edit({ text: voteText(vote), parseMode: "html", buttons: new InlineKeyboard().callback(`✅ 同意 Ban（${vote.voters.size}/${REQUIRED_VOTES}）`, `ban_ad_spam:${token}`) });
+  }
 
   listenMessageHandler = async (msg: Api.Message): Promise<void> => {
     try {
+      this.cleanupVotes();
       if ((msg as any).out || !msg.client || !msg.peerId) return;
 
       const text = getMessageText(msg);
       if (!text.toLowerCase().includes("ban广告")) return;
-
-      const replyMessageId = getReplyMessageId(msg);
-      if (!replyMessageId) return;
+      const targetMessageId = getReplyMessageId(msg);
+      if (!targetMessageId) return;
 
       const me = await safeGetMe(msg.client);
-      if (!me) return;
-      const myId = toId(me.id);
-      const myUsername = me.username || "";
-      if (!explicitlyMentionsMe(msg, myId, myUsername)) return;
+      if (!me || !explicitlyMentionsMe(msg, toId(me.id), me.username || "")) return;
 
-      await msg.client.sendMessage(msg.peerId, {
-        message: "/spam",
-        replyTo: replyMessageId,
+      const token = `${Date.now()}_${++this.sequence}`;
+      const vote: Vote = {
+        peer: msg.peerId,
+        client: msg.client,
+        targetMessageId,
+        voteMessage: msg,
+        voters: new Set<string>(),
+        expiresAt: Date.now() + VOTE_TTL_MS,
+        completed: false,
+      };
+      const voteMessage = await msg.client.sendMessage(msg.peerId, {
+        message: voteText(vote),
+        replyTo: targetMessageId,
+        buttons: new InlineKeyboard().callback(`✅ 同意 Ban（0/${REQUIRED_VOTES}）`, `ban_ad_spam:${token}`),
+        parseMode: "html",
       });
-      console.log(`[ban_ad_spam] 已对目标消息 ${replyMessageId} 回复 /spam`);
+      vote.voteMessage = voteMessage;
+      this.votes.set(token, vote);
+      setTimeout(() => {
+        const current = this.votes.get(token);
+        if (!current || current.completed) return;
+        this.votes.delete(token);
+        current.voteMessage.edit({ text: "⌛ <b>Ban 投票已超时</b>", parseMode: "html", buttons: [] }).catch(() => undefined);
+      }, VOTE_TTL_MS);
     } catch (error) {
-      console.error("[ban_ad_spam] 自动举报失败:", error);
+      console.error("[ban_ad_spam] 创建投票失败:", error);
     }
   };
 }
