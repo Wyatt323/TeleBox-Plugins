@@ -21,6 +21,7 @@
 | `tj` | `.tj` | 统计指定消息的全部回复，列出回复用户、时间和消息内容。 |
 | `aix` | `.aix` | AI 对话、绘图、模型与提示词等 AI 功能。 |
 | `stsave` | `.stsave` / `.st` | 保存贴纸，或将回复的图片、视频等媒体转换后保存到贴纸包。 |
+| `ban_ad_spam` | 自动监听 | 别人回复消息并 @你 且包含 `ban广告` 时，自动对目标消息回复 `/spam`。 |
 | `yvlux` | `.yvlux` | 根据消息生成语录贴纸，并支持保存到贴纸包。 |
 
 ## 安装插件
@@ -29,6 +30,7 @@
 .tpm i tj
 .tpm i aix
 .tpm i stsave
+.tpm i ban_ad_spam
 .tpm i yvlux
 ```
 

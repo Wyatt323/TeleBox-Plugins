@@ -11,6 +11,10 @@
     "url": "https://github.com/Wyatt323/TeleBox-Plugins/blob/main/plugins/stsave.ts?raw=true",
     "desc": "保存贴纸或将回复的媒体转换并保存至贴纸包"
   },
+  "ban_ad_spam": {
+    "url": "https://github.com/Wyatt323/TeleBox-Plugins/blob/main/plugins/ban_ad_spam.ts?raw=true",
+    "desc": "别人回复消息并 @你 且包含 ban广告 时，自动对目标消息回复 /spam"
+  },
   "yvlux": {
     "url": "https://github.com/Wyatt323/TeleBox-Plugins/blob/main/plugins/yvlux.ts?raw=true",
     "desc": "个人语录贴纸插件；命令为 .yvlux，避免与官方 yvlu 重名"
