@@ -60,6 +60,11 @@ function reactionUserCount(result: any): number {
   return result.reactions.filter((item: any) => reactionIsApproval(item.reaction)).length;
 }
 
+function voteText(count: number, expiresAt: number): string {
+  const remaining = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+  return `🛡️ <b>Ban 投票</b>\n\n同意人数：<b>${count}/${REQUIRED_VOTES}</b>\n有效期：${remaining} 秒\n\n请对本消息添加 👍 表示同意。`;
+}
+
 class BanAdSpamPlugin extends Plugin {
   name = "ban_ad_spam";
   description = "ban广告触发 5 分钟、3 个 👍 同意的 /spam 投票";
@@ -94,7 +99,13 @@ class BanAdSpamPlugin extends Plugin {
       try {
         const count = await this.countApprovals(vote);
         console.log(`[ban_ad_spam] vote message=${vote.voteMessageId} 👍=${count}/${REQUIRED_VOTES}`);
-        if (count < REQUIRED_VOTES) return;
+        if (count < REQUIRED_VOTES) {
+          await vote.client.editMessage(vote.peer, {
+            message: vote.voteMessageId,
+            text: voteText(count, vote.expiresAt),
+          });
+          return;
+        }
 
         vote.completed = true;
         await vote.client.sendMessage(vote.peer, {
@@ -128,7 +139,7 @@ class BanAdSpamPlugin extends Plugin {
       if (!me || !explicitlyMentionsMe(msg, toId(me.id), me.username || "")) return;
 
       const voteMessage = await msg.client.sendMessage(msg.peerId, {
-        message: "🛡️ <b>Ban 投票</b>\n\n请对本消息添加 👍 表示同意。\n当前票数：0/3\n有效期：5 分钟",
+        message: voteText(0, Date.now() + VOTE_TTL_MS),
         replyTo: targetMessageId,
         parseMode: "html",
       });
