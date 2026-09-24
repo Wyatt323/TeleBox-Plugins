@@ -103,6 +103,7 @@ class BanAdSpamPlugin extends Plugin {
           await vote.client.editMessage(vote.peer, {
             message: vote.voteMessageId,
             text: voteText(count, vote.expiresAt),
+            parseMode: "html",
           });
           return;
         }
@@ -114,7 +115,8 @@ class BanAdSpamPlugin extends Plugin {
         });
         await vote.client.editMessage(vote.peer, {
           message: vote.voteMessageId,
-          text: "✅ 投票通过\n已达到 3 个 👍，已回复 /spam。",
+          text: "✅ <b>投票通过</b>\n已达到 3 个 👍，已回复 /spam。",
+          parseMode: "html",
         });
         this.votes.delete(this.voteKey(vote.peer, vote.voteMessageId));
       } catch (error) {
@@ -161,7 +163,8 @@ class BanAdSpamPlugin extends Plugin {
         this.votes.delete(key);
         current.client.editMessage(current.peer, {
           message: current.voteMessageId,
-          text: "⌛ Ban 投票已超时。",
+          text: "⌛ <b>Ban 投票已超时</b>。",
+          parseMode: "html",
         }).catch(() => undefined);
       }, VOTE_TTL_MS);
     } catch (error) {
