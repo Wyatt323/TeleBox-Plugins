@@ -299,12 +299,27 @@ const mainPrefix = prefixes[0];
 const pluginName = "yvlux";
 const commandName = `${mainPrefix}${pluginName}`;
 
+const MAX_PICK_POSITION = 100;
+function parsePickPositions(value: string): number[] {
+  if (!/^\d+(?:[,，]\d+)*$/.test(value)) throw new Error("用法：.yvlux pick 1,6,8（序号之间用逗号，不加空格）");
+  const positions = [...new Set(value.split(/[,，]/).map(Number))].sort((a, b) => a - b);
+  if (positions.some(n => !Number.isSafeInteger(n) || n < 1 || n > MAX_PICK_POSITION)) throw new Error("消息序号必须是 1–100 的整数");
+  if (positions.length > 5) throw new Error("最多选择 5 条消息");
+  return positions;
+}
+function selectPickedMessages<T>(messages: T[], positions: number[]): T[] {
+  const missing = positions.filter(n => n > messages.length);
+  if (missing.length) throw new Error(`未找到第 ${missing.join("、")} 条消息；当前范围内只有 ${messages.length} 条`);
+  return positions.map(n => messages[n - 1]);
+}
+
 // 包含自定义修改后的 Help 文档字符串
 const help_text = `
 <b>🎨 YVLU 语录生成器 (增强版)</b>
 
 <b>1. 生成语录</b>
 • <code>${commandName} [数量]</code> - 回复消息，生成最近 N 条
+• <code>${commandName} pick 1,6,8</code> - 从回复消息起计数，跳选合成（最多 5 条，序号 1–100）
 • <code>${commandName} r [数量]</code> - 包含被引用(Reply)的消息进行生成
 • <code>${commandName} &lt;自定义文字&gt;</code> - <b>修改回复消息的内容</b>为自定义文字进行生成
 
@@ -500,6 +515,7 @@ class YvluPlugin extends Plugin {
       const subCmd = args[1]?.toLowerCase();
 
       let count = 1;
+      let pickPositions: number[] | undefined;
       let r = false;
       let valid = false;
       let customText: string | undefined;
@@ -524,7 +540,17 @@ class YvluPlugin extends Plugin {
       }
 
       // ================= 语录生成解析 =================
-      if (!args[1] || /^\d+$/.test(args[1])) {
+      if (subCmd === "pick") {
+        try {
+          if (args.length !== 3) throw new Error("用法：.yvlux pick 1,6,8（序号之间用逗号，不加空格）");
+          pickPositions = parsePickPositions(args[2]);
+          count = pickPositions[pickPositions.length - 1];
+          valid = true;
+        } catch (error) {
+          await msg.edit({ text: `❌ ${error instanceof Error ? error.message : "序号无效"}` });
+          return;
+        }
+      } else if (!args[1] || /^\d+$/.test(args[1])) {
         // 命令：yvlu 或 yvlu 3
         count = parseInt(args[1]) || 1;
         valid = true;
@@ -545,7 +571,7 @@ class YvluPlugin extends Plugin {
           await msg.edit({ text: "请回复一条消息" });
           return;
         }
-        if (count > 5) {
+        if (!pickPositions && count > 5) {
           await msg.edit({ text: "太多了 哒咩，最多 5 条！" });
           return;
         }
@@ -556,11 +582,19 @@ class YvluPlugin extends Plugin {
           const client = await getGlobalClient();
 
           // 逆序抓取目标上下文消息
-          const messages = await msg.client?.getMessages(replied?.peerId, {
-            offsetId: replied!.id - 1,
+          let messages = await client.getMessages(replied.peerId, {
+            offsetId: replied.id - 1,
             limit: count,
             reverse: true,
+            ...(pickPositions ? { maxId: msg.id } : {}),
           });
+          if (pickPositions) {
+            // Count real messages, not arithmetic message IDs; exclude the command.
+            const ordered = Array.from(new Map([replied, ...messages]
+              .filter(m => m.id >= replied!.id && m.id < msg.id && !(m instanceof Api.MessageService))
+              .map(m => [m.id, m])).values()).sort((a, b) => a.id - b.id);
+            messages = selectPickedMessages(ordered, pickPositions) as typeof messages;
+          }
 
           if (!messages || messages.length === 0) {
             await msg.edit({ text: "未找到消息" });
