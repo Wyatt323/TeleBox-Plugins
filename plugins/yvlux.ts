@@ -21,6 +21,7 @@ import dayjs from "dayjs";
 import * as zlib from "zlib";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import sharp from "sharp";
 
 // 将 execFile 转换为 Promise 版本以便于在 async/await 中使用
 const execFileAsync = promisify(execFile);
@@ -197,6 +198,108 @@ async function convertMp4ToWebm(mp4Buffer: Buffer): Promise<Buffer> {
   }
 }
 
+// Quote API 的远程图片加载器不接受 data: URL。单条贴纸语录先生成名字/标签，
+// 再在本地把贴纸首帧拼到语录下方，避免只得到一个空的名字气泡。
+async function videoFirstFrame(buffer: Buffer): Promise<Buffer> {
+  const os = await import("os");
+  const file = path.join(os.tmpdir(), `yvlux_frame_${Date.now()}_${Math.random().toString(36).slice(2)}.video`);
+  try {
+    fs.writeFileSync(file, buffer);
+    const { stdout } = await execFileAsync("ffmpeg", ["-i", file, "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "pipe:1"], {
+      encoding: "buffer", maxBuffer: 32 * 1024 * 1024, timeout: 15000,
+    });
+    return stdout as Buffer;
+  } finally {
+    try { fs.unlinkSync(file); } catch {}
+  }
+}
+
+async function stickerFirstFrame(message: Api.Message): Promise<Buffer> {
+  const mime = ((message.media as any)?.document?.mimeType || "").toLowerCase();
+  const animated = mime === "application/x-tgsticker" || mime === "video/webm";
+  const attempts = animated ? [{ thumb: 1 }, {}] : [{}, { thumb: 1 }];
+  for (const options of attempts) {
+    try {
+      const data = await (message as any).downloadMedia(options);
+      if (!Buffer.isBuffer(data) || !data.length) continue;
+      if (isTgsFormat(data)) {
+        const dependencies = await checkTgsDependencies();
+        if (!dependencies.ok) continue;
+        return await videoFirstFrame(await convertTgsToWebm(data));
+      }
+      if (isWebmFormat(data) || isMp4Format(data)) return await videoFirstFrame(data);
+      return await sharp(data, { animated: false }).png().toBuffer();
+    } catch (error) {
+      console.warn("提取贴纸首帧失败，尝试其他来源", error);
+    }
+  }
+  throw new Error("无法读取贴纸画面；动态贴纸请确认缩略图或 ffmpeg/rlottie-python 可用");
+}
+
+async function appendStickerToQuote(quote: Buffer, sticker: Buffer): Promise<Buffer> {
+  const headerImage = isWebmFormat(quote) ? await videoFirstFrame(quote) : quote;
+  const header = await sharp(headerImage).trim().png().toBuffer({ resolveWithObject: true });
+  const frame = await sharp(sticker).trim().resize({ width: 384, height: 384, fit: "inside", withoutEnlargement: true }).png().toBuffer({ resolveWithObject: true });
+  const width = Math.max(header.info.width, frame.info.width);
+  const height = header.info.height + 8 + frame.info.height;
+  const combined = await sharp({ create: { width, height, channels: 4, background: "#00000000" } })
+    .composite([
+      { input: header.data, left: Math.floor((width - header.info.width) / 2), top: 0 },
+      { input: frame.data, left: Math.floor((width - frame.info.width) / 2), top: header.info.height + 8 },
+    ]).png().toBuffer();
+  return sharp(combined).resize({ width: 512, height: 512, fit: "inside", withoutEnlargement: true }).webp().toBuffer();
+}
+
+async function restoreAvatars(quote: Buffer, photos: (Buffer | undefined)[]): Promise<Buffer> {
+  if (!photos.some(Boolean) || isWebmFormat(quote) || isAnimatedWebP(quote)) return quote;
+  const { data, info } = await sharp(quote).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const candidates: { x: number; top: number; bottom: number; length: number }[] = [];
+  const scanWidth = Math.floor(info.width * 0.14);
+
+  // 头像占成品左侧透明区域；找每一行头像圆形的最长纵向不透明区间。
+  for (let x = 0; x < scanWidth; x++) {
+    let start = -1;
+    for (let y = 0; y <= info.height; y++) {
+      const opaque = y < info.height && data[(y * info.width + x) * 4 + 3] > 128;
+      if (opaque && start < 0) start = y;
+      if (!opaque && start >= 0) {
+        const length = y - start;
+        if (length >= 20 && length <= info.width / 3) candidates.push({ x, top: start, bottom: y - 1, length });
+        start = -1;
+      }
+    }
+  }
+
+  const groups: typeof candidates = [];
+  for (const candidate of candidates.sort((a, b) => b.length - a.length)) {
+    if (groups.some(group => candidate.top <= group.bottom && candidate.bottom >= group.top)) continue;
+    groups.push(candidate);
+  }
+  groups.sort((a, b) => a.top - b.top);
+  if (groups.length !== photos.length) {
+    console.warn(`头像位置数量不匹配：预期 ${photos.length}，检测到 ${groups.length}`);
+    return quote;
+  }
+
+  const overlays: { input: Buffer; left: number; top: number }[] = [];
+  for (let i = 0; i < groups.length; i++) {
+    if (!photos[i]) continue;
+    const position = groups[i];
+    const size = position.length + 2;
+    const left = 0; // Quote API 把头像贴在画布最左侧。
+    const top = Math.max(0, position.top - 1);
+    if (left + size > info.width || top + size > info.height) continue;
+    try {
+      const mask = Buffer.from(`<svg width="${size}" height="${size}"><circle cx="${size / 2}" cy="${size / 2}" r="${size / 2}" fill="white"/></svg>`);
+      const avatar = await sharp(photos[i]).resize(size, size, { fit: "cover" }).composite([{ input: mask, blend: "dest-in" }]).png().toBuffer();
+      overlays.push({ input: avatar, left, top });
+    } catch (error) {
+      console.warn("合成头像失败", error);
+    }
+  }
+  return overlays.length ? sharp(quote).composite(overlays).webp().toBuffer() : quote;
+}
+
 /**
  * 知识点：手动解析 WebP 文件的二进制头信息来获取图片宽和高
  * 支持 VP8(有损), VP8L(无损), VP8X(扩展) 三种编码格式的头部解析
@@ -313,6 +416,64 @@ function selectPickedMessages<T>(messages: T[], positions: number[]): T[] {
   return positions.map(n => messages[n - 1]);
 }
 
+// Quote API 在消息级别读取 senderTag / senderTagRole；管理员角色会使用绿色标签。
+async function getGroupSenderTag(client: any, message: Api.Message): Promise<{ tag: string; role: "owner" | "admin" | "member" } | undefined> {
+  if (message.fwdFrom || !(message.fromId instanceof Api.PeerUser)) return undefined;
+
+  try {
+    let participant: any;
+    if (message.peerId instanceof Api.PeerChannel) {
+      const peer = await client.getInputEntity(message.peerId);
+      const channel = new Api.InputChannel({ channelId: peer.channelId, accessHash: peer.accessHash });
+      const result = await client.invoke(new Api.channels.GetParticipant({
+        channel,
+        participant: await client.getInputEntity(message.fromId),
+      }));
+      participant = result.participant;
+    } else if (message.peerId instanceof Api.PeerChat) {
+      const result = await client.invoke(new Api.messages.GetFullChat({ chatId: message.peerId.chatId }));
+      participant = result.fullChat?.participants?.participants?.find(
+        (entry: any) => entry.userId?.toString() === message.fromId.userId.toString()
+      );
+    } else {
+      return undefined;
+    }
+
+    if (participant instanceof Api.ChannelParticipantCreator || participant instanceof Api.ChatParticipantCreator) {
+      return { tag: participant.rank?.trim() || "群主", role: "owner" };
+    }
+    if (participant instanceof Api.ChannelParticipantAdmin || participant instanceof Api.ChatParticipantAdmin) {
+      return { tag: participant.rank?.trim() || "管理员", role: "admin" };
+    }
+    // 普通成员没有群组头衔时不显示标签。
+    const memberTag = participant?.rank?.trim();
+    return memberTag ? { tag: memberTag, role: "member" } : undefined;
+  } catch (error) {
+    console.warn("获取群组头衔失败", error);
+    return undefined;
+  }
+}
+
+function parseQuoteOverride(value: string, label: string): string {
+  const raw = value.trim();
+  const trimmed = ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'")))
+    ? raw.slice(1, -1).trim() : raw;
+  if (!trimmed || trimmed.length > 64 || /[\r\n]/.test(trimmed)) {
+    throw new Error(`${label}必须为 1–64 个字符，且不能换行`);
+  }
+  return trimmed;
+}
+
+function parseOverrideAndText(value: string, label: string): { override: string; text?: string } {
+  // 名字/标签默认是第一个词；带空格的值可用单引号或双引号包裹。
+  const match = value.trim().match(/^(?:"([^"]+)"|'([^']+)'|(\S+))(?:\s+([\s\S]+))?$/);
+  if (!match) throw new Error(`请提供${label}`);
+  return {
+    override: parseQuoteOverride(match[1] || match[2] || match[3], label),
+    text: match[4]?.trim() || undefined,
+  };
+}
+
 // 包含自定义修改后的 Help 文档字符串
 const help_text = `
 <b>🎨 YVLU 语录生成器 (增强版)</b>
@@ -322,6 +483,11 @@ const help_text = `
 • <code>${commandName} pick 1,6,8</code> - 从回复消息起计数，跳选合成（最多 5 条，序号 1–100）
 • <code>${commandName} r [数量]</code> - 包含被引用(Reply)的消息进行生成
 • <code>${commandName} &lt;自定义文字&gt;</code> - <b>修改回复消息的内容</b>为自定义文字进行生成
+• <code>${commandName} name 名字 [自定义文字]</code> - 本次生成使用自定义名字和可选文字
+• <code>${commandName} tag 标签 [自定义文字]</code> - 本次生成使用自定义标签和可选文字
+• <code>${commandName} as 名字 | 标签 [自定义文字]</code> - 同时修改名字、标签和可选文字
+• 名字或标签含空格时可用引号包裹，例如 <code>${commandName} name "新 名字" 自定义文字</code>
+• 群组管理员会自动显示群内头衔（绿色标签）
 
 <b>2. 贴纸包管理</b>
 • <code>${commandName} s</code> - 回复图片/贴纸，将其直接保存到你的专属贴纸包
@@ -398,13 +564,8 @@ interface YvluConfig {
   _comment?: string;
 }
 
-// 通过 Base64 解码隐蔽地存储默认 API 路径，增加一定安全性
-const DEFAULT_API_URL = JSON.parse(
-  Buffer.from(
-    "eyJ1cmwiOiJodHRwczovL3F1b3RlLWFwaS1lbmhhbmNlZC56aGV0ZW5nc2hhLmV1Lm9yZy9nZW5lcmF0ZS53ZWJwIn0=",
-    "base64"
-  ).toString("utf-8")
-).url;
+// 此接口已验证支持 senderTag / senderTagRole，并能渲染绿色管理员标签。
+const DEFAULT_API_URL = "https://quote.yuri.ly/generate.webp";
 
 
 class YvluPlugin extends Plugin {
@@ -519,6 +680,8 @@ class YvluPlugin extends Plugin {
       let r = false;
       let valid = false;
       let customText: string | undefined;
+      let customName: string | undefined;
+      let customTag: string | undefined;
 
       // ================= 路由控制 =================
       // 1. 配置管理路由
@@ -548,6 +711,32 @@ class YvluPlugin extends Plugin {
           valid = true;
         } catch (error) {
           await msg.edit({ text: `❌ ${error instanceof Error ? error.message : "序号无效"}` });
+          return;
+        }
+      } else if (subCmd === "name" || subCmd === "tag" || subCmd === "as") {
+        try {
+          const value = msg.message.replace(/^\S+\s+\S+\s*/, "");
+          if (subCmd === "name") {
+            const parsed = parseOverrideAndText(value, "名字");
+            customName = parsed.override;
+            customText = parsed.text;
+          }
+          if (subCmd === "tag") {
+            const parsed = parseOverrideAndText(value, "标签");
+            customTag = parsed.override;
+            customText = parsed.text;
+          }
+          if (subCmd === "as") {
+            const separator = value.indexOf("|");
+            if (separator < 0) throw new Error(`用法：${commandName} as 名字 | 标签 [自定义文字]`);
+            customName = parseQuoteOverride(value.slice(0, separator), "名字");
+            const parsed = parseOverrideAndText(value.slice(separator + 1), "标签");
+            customTag = parsed.override;
+            customText = parsed.text;
+          }
+          valid = true;
+        } catch (error) {
+          await msg.edit({ text: `❌ ${error instanceof Error ? error.message : "参数无效"}` });
           return;
         }
       } else if (!args[1] || /^\d+$/.test(args[1])) {
@@ -603,6 +792,9 @@ class YvluPlugin extends Plugin {
 
           const items = [] as any[];
           let previousUserIdentifier: string | null = null;
+          const groupTags = new Map<string, { tag: string; role: "owner" | "admin" | "member" } | undefined>();
+          let standaloneSticker: Buffer | undefined;
+          const avatarPhotos: (Buffer | undefined)[] = [];
 
           for await (const [i, message] of messages.entries()) {
             // 获取发送者信息
@@ -652,6 +844,13 @@ class YvluPlugin extends Plugin {
             const lastName = (sender as any).lastName || "";
             const username = (sender as any).username || "";
             const emojiStatus = (sender as any).emojiStatus?.documentId?.toString() || null;
+            const tagKey = `${message.peerId?.constructor?.name}:${getPeerNumericId(message.peerId)}:${message.fromId instanceof Api.PeerUser ? message.fromId.userId : "anonymous"}`;
+            if (!message.fwdFrom && !groupTags.has(tagKey)) groupTags.set(tagKey, await getGroupSenderTag(client, message));
+            const groupTag = message.fwdFrom ? undefined : groupTags.get(tagKey);
+            const displayName = i === 0 && customName ? customName : name;
+            const displayFirstName = i === 0 && customName ? customName : firstName;
+            const displayLastName = i === 0 && customName ? "" : lastName;
+            const senderTag = i === 0 && customTag ? customTag : groupTag?.tag;
 
             // 根据前序用户标识决定是否连通气泡（不在气泡旁绘制头像）
             const currentUserIdentifier = userId || hashCode(name || `${firstName}|${lastName}` || `user_${i}`).toString();
@@ -660,16 +859,21 @@ class YvluPlugin extends Plugin {
 
             // 下载用户头像 (仅需渲染的时候才进行网络请求)
             let photo: { url: string } | undefined = undefined;
+            let avatarBuffer: Buffer | undefined;
             if (shouldShowAvatar) {
-              try {
-                const buffer = await client.downloadProfilePhoto(sender as any, { isBig: false });
-                if (Buffer.isBuffer(buffer) && buffer.length > 0) {
-                  const base64 = buffer.toString("base64");
-                  photo = { url: `data:image/jpeg;base64,${base64}` };
+              for (const source of [sender, ...(!message.fwdFrom && message.fromId ? [message.fromId] : [])]) {
+                try {
+                  const buffer = await client.downloadProfilePhoto(source as any, { isBig: false });
+                  if (Buffer.isBuffer(buffer) && buffer.length > 0) {
+                    avatarBuffer = buffer;
+                    photo = { url: `data:image/jpeg;base64,${buffer.toString("base64")}` };
+                    break;
+                  }
+                } catch (error) {
+                  console.warn("下载用户头像失败，尝试其他来源", error);
                 }
-              } catch (e) {
-                console.warn("下载用户头像失败", e);
               }
+              avatarPhotos.push(avatarBuffer);
             }
 
             // ================= 自定义文字覆盖逻辑 (合并项) =================
@@ -759,8 +963,14 @@ class YvluPlugin extends Plugin {
 
             // ================= 媒体(多媒体文件)下载与格式转换逻辑 =================
             let media: { url: string } | undefined = undefined;
+            const isStandaloneSticker = messages.length === 1 &&
+              message.media instanceof Api.MessageMediaDocument &&
+              ((message.media.document as any)?.attributes || []).some(
+                (attribute: any) => attribute instanceof Api.DocumentAttributeSticker
+              );
+            if (isStandaloneSticker) standaloneSticker = await stickerFirstFrame(message);
             try {
-              if (message.media) {
+              if (message.media && !isStandaloneSticker) {
                 let mediaTypeForQuote: string | undefined = undefined;
                 // 检测它是否为 Sticker(贴纸属性)
                 const isSticker =
@@ -830,9 +1040,9 @@ class YvluPlugin extends Plugin {
             items.push({
               from: {
                 id: userId ? parseInt(userId) : hashCode(sender.name || `${firstName}|${lastName}`),
-                name: shouldShowAvatar ? name : "",
-                first_name: shouldShowAvatar ? firstName || undefined : undefined,
-                last_name: shouldShowAvatar ? lastName || undefined : undefined,
+                name: shouldShowAvatar ? displayName : "",
+                first_name: shouldShowAvatar ? displayFirstName || undefined : undefined,
+                last_name: shouldShowAvatar ? displayLastName || undefined : undefined,
                 username: photo && shouldShowAvatar ? username || undefined : undefined,
                 photo,
                 emoji_status: shouldShowAvatar ? emojiStatus || undefined : undefined,
@@ -840,6 +1050,7 @@ class YvluPlugin extends Plugin {
               text: message.message || "",
               entities: entities,
               avatar: shouldShowAvatar,
+              ...(senderTag && shouldShowAvatar ? { senderTag, senderTagRole: groupTag?.role || "member" } : {}),
               media,
               ...(replyBlock ? { replyMessage: replyBlock } : {}),
             });
@@ -858,7 +1069,10 @@ class YvluPlugin extends Plugin {
           };
 
           const quoteResult = await this.generateQuote(quoteData);
-          const imageBuffer = quoteResult.buffer;
+          const quoteWithAvatars = await restoreAvatars(quoteResult.buffer, avatarPhotos);
+          const imageBuffer = standaloneSticker
+            ? await appendStickerToQuote(quoteWithAvatars, standaloneSticker)
+            : quoteWithAvatars;
           const imageExt = quoteResult.ext; 
 
           if (!imageBuffer || imageBuffer.length === 0) {
