@@ -496,6 +496,10 @@ const help_text = `
 <b>3. API 设置</b>
 • <code>${commandName} api [URL]</code> - 设置自定义后端 Quote API
 • <code>${commandName} api reset</code> - 重置为默认后端 API
+
+<b>4. 生成提示</b>
+• <code>${commandName} progress on</code> - 生成前显示“正在生成语录贴纸…”
+• <code>${commandName} progress off</code> - 直接生成（默认）
 `;
 
 /**
@@ -553,6 +557,42 @@ function convertEntities(entities: Api.TypeMessageEntity[]): any[] {
   });
 }
 
+function wrapQuoteText(text: string, entities: any[]): { text: string; entities: any[] } {
+  if (!text || /[\r\n]/.test(text)) return { text, entities };
+  const graphemes = typeof Intl.Segmenter === "function"
+    ? Array.from(new Intl.Segmenter("zh", { granularity: "grapheme" }).segment(text), part => part.segment)
+    : Array.from(text);
+  const visualWidth = (part: string) => /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Extended_Pictographic}]/u.test(part) ? 2 : 1;
+  const totalWidth = graphemes.reduce((sum, part) => sum + visualWidth(part), 0);
+  const maxWidth = 26; // 约 13 个汉字；较长内容会在贴纸上分为两行或更多行。
+  if (totalWidth <= maxWidth) return { text, entities };
+
+  const lineCount = Math.ceil(totalWidth / maxWidth);
+  const targetWidth = Math.ceil(totalWidth / lineCount);
+  const breaks: number[] = [];
+  let offset = 0;
+  let lineWidth = 0;
+  for (const part of graphemes) {
+    const width = visualWidth(part);
+    if (lineWidth && lineWidth + width > targetWidth) {
+      breaks.push(offset);
+      lineWidth = 0;
+    }
+    lineWidth += width;
+    offset += part.length; // Telegram entity offset 使用 UTF-16 索引。
+  }
+  if (!breaks.length) return { text, entities };
+
+  let wrapped = text;
+  for (const position of [...breaks].reverse()) wrapped = `${wrapped.slice(0, position)}\n${wrapped.slice(position)}`;
+  const adjusted = entities.map(entity => ({
+    ...entity,
+    offset: entity.offset + breaks.filter(position => position <= entity.offset).length,
+    length: entity.length + breaks.filter(position => entity.offset < position && position < entity.offset + entity.length).length,
+  }));
+  return { text: wrapped, entities: adjusted };
+}
+
 // ===================== 类定义区域 =====================
 
 /**
@@ -561,6 +601,7 @@ function convertEntities(entities: Api.TypeMessageEntity[]): any[] {
 interface YvluConfig {
   stickerSetShortName: string;
   apiUrl: string;
+  showProgress?: boolean;
   _comment?: string;
 }
 
@@ -588,6 +629,7 @@ class YvluPlugin extends Plugin {
       const defaultConfig: YvluConfig = {
         stickerSetShortName: "",
         apiUrl: "",
+        showProgress: false,
         _comment: "shortName 只能包含字母、数字和下划线; apiUrl为空时使用默认",
       };
       fs.writeFileSync(this.configPath, JSON.stringify(defaultConfig, null, 2), "utf-8");
@@ -609,15 +651,15 @@ class YvluPlugin extends Plugin {
       }
 
       if (!fs.existsSync(this.configPath)) {
-        this.config = { stickerSetShortName: "", apiUrl: "" };
+        this.config = { stickerSetShortName: "", apiUrl: "", showProgress: false };
         return;
       }
 
       const configData = fs.readFileSync(this.configPath, "utf-8");
-      this.config = JSON.parse(configData);
+      this.config = { stickerSetShortName: "", apiUrl: "", showProgress: false, ...JSON.parse(configData) };
     } catch (error) {
       console.error("加载 yvlu 配置失败:", error);
-      this.config = { stickerSetShortName: "", apiUrl: "" };
+      this.config = { stickerSetShortName: "", apiUrl: "", showProgress: false };
     }
   }
 
@@ -687,6 +729,11 @@ class YvluPlugin extends Plugin {
       // 1. 配置管理路由
       if (subCmd === "config") {
         await this.handleConfigCommand(msg, args.slice(2));
+        return;
+      }
+
+      if (subCmd === "progress") {
+        await this.handleConfigCommand(msg, ["progress", ...args.slice(2)]);
         return;
       }
 
@@ -765,9 +812,15 @@ class YvluPlugin extends Plugin {
           return;
         }
 
-        await msg.edit({ text: "正在生成语录贴纸..." });
-
         try {
+          await this.loadConfig();
+          if (this.config?.showProgress) {
+            try {
+              await msg.edit({ text: "正在生成语录贴纸..." });
+            } catch (error) {
+              console.warn("显示生成提示失败", error);
+            }
+          }
           const client = await getGlobalClient();
 
           // 逆序抓取目标上下文消息
@@ -891,7 +944,7 @@ class YvluPlugin extends Plugin {
               }
             }
 
-            const entities = convertEntities(message.entities || []);
+            const quoteText = wrapQuoteText(message.message || "", convertEntities(message.entities || []));
 
             // ================= 回复块(Reply Header)构造逻辑 =================
             let replyBlock: any | undefined;
@@ -1047,8 +1100,8 @@ class YvluPlugin extends Plugin {
                 photo,
                 emoji_status: shouldShowAvatar ? emojiStatus || undefined : undefined,
               },
-              text: message.message || "",
-              entities: entities,
+              text: quoteText.text,
+              entities: quoteText.entities,
               avatar: shouldShowAvatar,
               ...(senderTag && shouldShowAvatar ? { senderTag, senderTagRole: groupTag?.role || "member" } : {}),
               media,
@@ -1182,6 +1235,7 @@ class YvluPlugin extends Plugin {
 ${this.config?.stickerSetShortName ? `<b>贴纸包链接:</b> t.me/addstickers/${this.config.stickerSetShortName}` : ""}
 
 <b>API URL:</b> <code>${this.config?.apiUrl || "默认"}</code>
+<b>生成提示:</b> <code>${this.config?.showProgress ? "开启" : "关闭"}</code>
 
 <b>配置文件路径:</b>
 <code>${this.configPath}</code>
@@ -1189,6 +1243,7 @@ ${this.config?.stickerSetShortName ? `<b>贴纸包链接:</b> t.me/addstickers/$
 <b>可用配置命令:</b>
 <code>${commandName} config sticker 贴纸包名称</code> - 设置贴纸包名称
 <code>${commandName} api [URL]</code> - 设置 API
+<code>${commandName} progress on|off</code> - 切换生成提示
 `;
         await msg.edit({ text: configInfo, parseMode: "html" });
         return;
@@ -1197,6 +1252,21 @@ ${this.config?.stickerSetShortName ? `<b>贴纸包链接:</b> t.me/addstickers/$
       const subCommand = args[0].toLowerCase();
 
       switch (subCommand) {
+        case "progress": {
+          const setting = args[1]?.toLowerCase();
+          if (!setting) {
+            await msg.edit({ text: `生成提示当前为${this.config?.showProgress ? "开启" : "关闭"}。\n使用 ${commandName} progress on 或 ${commandName} progress off 切换。` });
+            return;
+          }
+          if ((setting !== "on" && setting !== "off") || args.length !== 2) {
+            await msg.edit({ text: `用法：${commandName} progress on|off` });
+            return;
+          }
+          this.config!.showProgress = setting === "on";
+          await this.saveConfig();
+          await msg.edit({ text: `✅ 生成提示已${this.config!.showProgress ? "开启" : "关闭"}。` });
+          return;
+        }
         case "sticker":
         case "stickerset":
         case "set": {
@@ -1227,7 +1297,7 @@ ${this.config?.stickerSetShortName ? `<b>贴纸包链接:</b> t.me/addstickers/$
 
         default:
           await msg.edit({
-            text: `❌ 未知的配置项: <code>${subCommand}</code>\n\n可用配置命令:\n<code>${commandName} config sticker 贴纸包名称</code> - 设置贴纸包名称`,
+            text: `❌ 未知的配置项: <code>${subCommand}</code>\n\n可用配置命令:\n<code>${commandName} config sticker 贴纸包名称</code> - 设置贴纸包名称\n<code>${commandName} progress on|off</code> - 切换生成提示`,
             parseMode: "html",
           });
       }
