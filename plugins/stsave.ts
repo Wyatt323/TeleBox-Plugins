@@ -205,13 +205,20 @@ async function convertVideoToWebm(input: Buffer): Promise<Buffer> {
   const outputPath = path.join(os.tmpdir(), `stsave_video_${unique}.webm`);
   try {
     fs.writeFileSync(inputPath, input);
+    const { stdout: probe } = await execFileAsync("ffprobe", [
+      "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of", "json", inputPath,
+    ]);
+    const codec = JSON.parse(probe).streams?.[0]?.codec_name;
+    // FFmpeg's native VP9 decoder can discard WebM alpha; libvpx preserves it.
+    const decoderArgs = codec === "vp9" ? ["-c:v", "libvpx-vp9"] : codec === "vp8" ? ["-c:v", "libvpx"] : [];
     let best: Buffer = Buffer.from([]);
     for (const crf of VIDEO_CRF_STEPS) {
       await execFileAsync("ffmpeg", [
         "-hide_banner", "-loglevel", "error", "-y",
+        ...decoderArgs,
         "-i", inputPath,
         "-t", "3",
-        "-vf", `scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000,fps=${VIDEO_STICKER_FPS}`,
+        "-vf", `format=yuva420p,scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000,fps=${VIDEO_STICKER_FPS}`,
         "-an", "-c:v", "libvpx-vp9",
         "-pix_fmt", "yuva420p",
         "-deadline", "good", "-cpu-used", "3",
@@ -373,10 +380,20 @@ class StsavePlugin extends Plugin {
         ? await this.resolveConfiguredTarget(client, configured, sticker.kind)
         : await this.findAutomaticTarget(client, me, sticker.kind);
 
-      if (target.create) {
-        await this.createPack(client, me, target.packName, sticker);
-      } else {
-        await this.addSticker(client, target.packName, sticker);
+      const save = async () => {
+        if (target.create) await this.createPack(client, me, target.packName, sticker);
+        else await this.addSticker(client, target.packName, sticker);
+      };
+      try {
+        await save();
+      } catch (error) {
+        // Retry only a rejected original video sticker, once. Other failures
+        // (permissions, capacity, flood limits) must not trigger a transcode.
+        if (detected.mode !== "sticker" || sticker.kind !== "video" ||
+            !errorCode(error).includes("STICKER_VIDEO_DIMENSIONS")) throw error;
+        await msg.edit({ text: "⏳ 原视频贴纸尺寸不被接受，正在规范化 WebM 后重试…" });
+        sticker = await this.convertAndUploadMedia(client, replied, "video", sticker.emoji);
+        await save();
       }
 
       await msg.edit({
@@ -439,6 +456,17 @@ class StsavePlugin extends Plugin {
       ];
       if (mode === "image") {
         attributes.splice(1, 0, new Api.DocumentAttributeImageSize({ w: 512, h: 512 }));
+      } else {
+        const { stdout } = await execFileAsync("ffprobe", [
+          "-v", "error", "-show_entries", "format=duration", "-of", "json", tempPath,
+        ]);
+        const duration = Number(JSON.parse(stdout).format?.duration);
+        if (!Number.isFinite(duration) || duration <= 0 || duration > 3.1) {
+          throw new Error("转换后的视频时长无效");
+        }
+        attributes.splice(1, 0, new Api.DocumentAttributeVideo({
+          w: 512, h: 512, duration, supportsStreaming: true,
+        }));
       }
 
       const uploaded = await client.sendFile("me", {
